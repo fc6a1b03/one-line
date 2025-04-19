@@ -26,11 +26,4 @@ ENV HOSTNAME="0.0.0.0"
 # 复制构建产物
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-# 使用dumb-init处理Linux信号（避免僵尸进程）
-RUN wget -O /usr/local/bin/dumb-init https://github.com/Yelp/dumb-init/releases/download/v1.2.5/dumb-init_1.2.5_x86_64 && \
-    chmod +x /usr/local/bin/dumb-init
-# 健康检查配置
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -f http://localhost:3000 || exit 1
-# 启动命令（exec格式避免僵尸进程）
-ENTRYPOINT ["/usr/local/bin/dumb-init", "--"]
 CMD ["node", "server.js"] 
