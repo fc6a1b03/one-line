@@ -8,8 +8,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 
 # 安装生产依赖（分离开发依赖以减小最终镜像体积）
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --omit=dev
+RUN npm install
 
 # --------------------- 构建阶段 ---------------------
 FROM base AS builder
