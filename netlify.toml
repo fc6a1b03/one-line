@@ -11,3 +11,10 @@
 # 添加 Next.js 的服务端运行设置
 [[plugins]]
   package = "@netlify/plugin-nextjs"
+
+# 增加API路由超时设置
+[functions]
+  included_files = [".next/server/pages/api/**"]
+  node_bundler = "esbuild"
+  # 将超时设置为60秒(60000ms)
+  timeout = 60

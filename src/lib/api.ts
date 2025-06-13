@@ -2,6 +2,12 @@ import axios from 'axios';
 import { type ApiConfig, type TimelineData, TimelineEvent, type Person, type SearxngResult, type SearxngSearchItem } from '@/types';
 import { enhancedSearch } from './searchEnhancer';
 
+// 设置API请求的总超时时间，避免超出Netlify限制
+const API_TIMEOUT_MS = 45000; // 45秒，低于Netlify的60秒限制
+
+// 新增: 定义流式进度回调类型
+export type StreamCallback = (chunk: string, isDone: boolean) => void;
+
 // 修改系统提示，使用分段文本格式而不是JSON
 const SYSTEM_PROMPT = `
 你是一个专业的历史事件分析助手。我需要你将热点事件以时间轴的方式呈现。
@@ -19,7 +25,7 @@ const SYSTEM_PROMPT = `
 标题：事件标题，简明扼要，突出核心内容
 描述：事件详细描述，包括事件的完整经过、各方行动和反应，以及事件的具体细节和背景信息
 相关人物：人物1(角色1,#颜色代码1);人物2(角色2,#颜色代码2)
-来源：事件信息来源，如新闻媒体、官方公告、研究报告等，请尽可能提供具体来源
+来源：事件信息来源，如新闻媒体、官方公告、研究报告等，请尽可能提供具体来源，包括原始新闻的URL链接
 
 --事件2--
 日期：...
@@ -30,6 +36,13 @@ const SYSTEM_PROMPT = `
 
 ... 更多事件 ...
 
+事件选择原则：
+1. 专注于记录关键事件、转折点和重要发展
+2. 只记录能够确认的事实，避免记录谣言或未经验证的信息
+3. 优先选择对整体事件理解有重要意义的发展
+4. 避免记录过多细枝末节的小事件，保持时间轴的清晰与重点突出
+5. 事件之间保持时间间隔的合理性，不要在某个时间段过度密集
+
 处理多来源信息的指南：
 1. 当不同来源提供相互矛盾的信息时，尝试通过以下方式解决：
    a. 优先考虑权威来源和一手资料
@@ -37,29 +50,19 @@ const SYSTEM_PROMPT = `
    c. 在事件描述中注明信息的差异和争议点
    d. 如果无法确定哪个来源更可靠，可以在描述中列举不同的观点
 
-2. 对于最新进展的处理：
-   a. 优先使用最新的信息更新事件时间线
-   b. 标明哪些信息是最新的，以及它们的来源
-   c. 区分已确认的事实和尚未确认的报道
-   d. 对于重大变化或转折点，给予特别关注
-
-3. 多角度分析：
-   a. 尽量呈现事件的多个方面
-   b. 考虑不同参与方的立场和观点
-   c. 分析事件的短期和长期影响
-   d. 关注事件的历史背景和潜在发展方向
-
 请确保：
 1. 按时间先后顺序组织事件（从最早到最近）
 2. 为每个相关人物分配不同的颜色代码，让用户能够轻松识别不同人物的动向
 3. 同一立场的人物使用相似的颜色
 4. 尽可能客观描述各方观点和行为
-5. 为每个事件标注可能的信息来源
+5. 为每个事件标注可能的信息来源，务必包含原始新闻的URL链接
 6. 如果事件有具体的日期，请务必提供精确日期
 7. 严格按照上述格式返回，不要添加其他格式
 8. 对于有争议的事件，确保描述多方的观点
 9. 事件描述尽可能详细，包含具体时间、地点、人物和事件经过
 10. 描述中包含事件产生的影响和后续发展
+11. 每个事件的描述要具体、详实但不过度冗长，通常在100-300字之间为宜
+12. 注重记录事件的事实性内容，而非评论性或推测性内容
 `;
 
 // 详细事件分析的系统提示
@@ -102,6 +105,104 @@ const EVENT_DETAILS_SYSTEM_PROMPT = `你是一个专业的历史事件分析助�
 10. 当搜索结果不充分时，明确指出信息的局限性，避免过度推断
 `;
 
+// 新增：使用流式API请求
+export async function fetchWithStream(
+  apiUrl: string,
+  payload: any,
+  streamCallback: StreamCallback
+): Promise<void> {
+  try {
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...payload,
+        stream: true
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`API responded with status ${response.status}: ${errorText}`);
+    }
+
+    if (!response.body) {
+      throw new Error("Response body is null");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        // 确保处理最后一块数据
+        if (buffer.length > 0) {
+          streamCallback(buffer, true);
+        }
+        break;
+      }
+
+      // 解码此块并加入缓冲区
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+
+      // 处理SSE格式的数据
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() || ""; // 最后一行可能不完整，保留到下一次迭代
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          try {
+            const data = line.slice(6); // 移除 "data: " 前缀
+            if (data === "[DONE]") {
+              // 流结束标记
+              streamCallback("", true);
+              return;
+            }
+
+            // 根据API的响应格式处理内容
+            // 需要根据实际的API响应格式进行调整
+            try {
+              const parsedData = JSON.parse(data);
+              const content = parsedData.choices?.[0]?.delta?.content ||
+                             parsedData.choices?.[0]?.message?.content ||
+                             "";
+              if (content) {
+                streamCallback(content, false);
+              }
+            } catch (e) {
+              // 如果不是标准JSON格式，直接传递数据
+              streamCallback(data, false);
+            }
+          } catch (e) {
+            console.error("Error parsing stream data:", e);
+          }
+        } else if (line.startsWith("event: error")) {
+          // 处理错误事件
+          const errorLine = lines.find(l => l.startsWith("data: "));
+          if (errorLine) {
+            try {
+              const errorData = JSON.parse(errorLine.slice(6));
+              throw new Error(errorData.error || "Stream error");
+            } catch (e) {
+              throw new Error("Stream error: " + errorLine);
+            }
+          } else {
+            throw new Error("Unknown stream error");
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Stream request failed:", error);
+    streamCallback(`错误：${error.message}`, true);
+    throw error;
+  }
+}
+
 // 解析文本响应，转换为TimelineData格式
 function parseTimelineText(text: string): TimelineData {
   try {
@@ -143,7 +244,6 @@ function parseTimelineText(text: string): TimelineData {
         if (peopleText) {
           const personEntries = peopleText.split(';').map(p => p.trim()).filter(p => p.length > 0);
 
-          // 使用for...of替代forEach
           for (const personEntry of personEntries) {
             // 格式：人物名(角色,#颜色)
             const personMatch = personEntry.match(/(.*?)\((.*?),(.*?)\)/);
@@ -171,7 +271,44 @@ function parseTimelineText(text: string): TimelineData {
 
         // 提取来源
         const sourceMatch = block.match(/来源：\s*([\s\S]*?)(?=\s*--事件|$)/);
-        const source = sourceMatch?.[1]?.trim() || "未指明来源";
+        const sourceRaw = sourceMatch?.[1]?.trim() || "未指明来源";
+
+        // 提取URL和网站名称
+        let sourceUrl = "";
+        let sourceName = sourceRaw;
+
+        // 处理"网站名（URL）"或"网站名(URL)"等格式
+        const nameUrlMatch = sourceRaw.match(/^(.+?)[\(（]+(https?:\/\/[^\s\)）]+)[\)）]+/);
+        if (nameUrlMatch) {
+          sourceName = nameUrlMatch[1].trim();
+          const originalUrl = nameUrlMatch[2].trim(); // 保存原始URL
+          sourceUrl = originalUrl.replace(/[\)\]]$/, ''); // 清理URL
+        } else {
+          // 尝试直接提取URL
+          const urlMatch = sourceRaw.match(/(https?:\/\/[^\s\)）]+)/);
+          if (urlMatch) {
+            const originalUrl = urlMatch[1]; // 保存原始URL
+            sourceUrl = originalUrl.replace(/[\)\]]$/, ''); // 清理URL
+
+            // 如果URL前有内容，取URL前的内容为sourceName（去除尾部标点）
+            const beforeUrl = sourceRaw.split(originalUrl)[0].trim().replace(/[\s:：\-—]+$/, '');
+            if (beforeUrl) {
+              sourceName = beforeUrl;
+            } else {
+              // 如果整个来源就是URL，使用域名作为显示文本
+              try {
+                const url = new URL(sourceUrl);
+                sourceName = url.hostname.replace(/^www\./, '');
+              } catch (e) {
+                sourceName = "查看来源";
+              }
+            }
+          } else {
+            // 没有URL，全部作为名称
+            sourceName = sourceRaw;
+            sourceUrl = "";
+          }
+        }
 
         // 创建事件对象
         return {
@@ -180,7 +317,8 @@ function parseTimelineText(text: string): TimelineData {
           title,
           description,
           people,
-          source
+          source: sourceName,
+          sourceUrl
         };
       });
 
@@ -205,34 +343,58 @@ function getApiUrl(apiConfig: ApiConfig, endpoint = 'chat'): string {
   return `/api/${endpoint}`;
 }
 
+// 新增: 定义进度回调类型
+export type ProgressCallback = (message: string, status: 'pending' | 'completed' | 'error') => void;
+
 // 新增：执行SearXNG搜索
 export async function searchWithSearxng(
   query: string,
-  apiConfig: ApiConfig
+  apiConfig: ApiConfig,
+  progressCallback?: ProgressCallback
 ): Promise<SearxngResult | null> {
   try {
     // 检查是否启用SearXNG
     if (!apiConfig.searxng?.enabled || !apiConfig.searxng?.url) {
-      console.log('SearXNG搜索未启用或URL未配置');
+      if (progressCallback) {
+        progressCallback('SearXNG搜索未启用，跳过搜索步骤', 'completed');
+      }
       return null;
     }
 
+    if (progressCallback) {
+      progressCallback(`正在使用搜索引擎查询：${query}`, 'pending');
+    }
+
     // 使用增强搜索功能
-    console.log('使用增强搜索功能...');
-    return enhancedSearch(query, apiConfig);
+    const result = await enhancedSearch(query, apiConfig, progressCallback);
+
+    if (progressCallback) {
+      if (result) {
+        progressCallback(`搜索完成，获取到 ${result.results.length} 条结果`, 'completed');
+      } else {
+        progressCallback('搜索未返回有效结果', 'completed');
+      }
+    }
+
+    return result;
   } catch (error) {
     console.error("SearXNG搜索请求失败:", error);
 
+    if (progressCallback) {
+      progressCallback(`搜索失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      progressCallback('尝试使用简单搜索作为备选方案', 'pending');
+    }
+
     // 如果增强搜索失败，回退到简单搜索
-    console.log('增强搜索失败，回退到简单搜索...');
-    return simpleSearch(query, apiConfig);
+    return simpleSearch(query, apiConfig, progressCallback);
   }
 }
 
 // 简单搜索 - 作为后备方案
 async function simpleSearch(
   query: string,
-  apiConfig: ApiConfig
+  apiConfig: ApiConfig,
+  progressCallback?: ProgressCallback
 ): Promise<SearxngResult | null> {
   try {
     if (!apiConfig.searxng?.enabled || !apiConfig.searxng?.url) {
@@ -242,6 +404,10 @@ async function simpleSearch(
     const searxngUrl = apiConfig.searxng.url;
     // 使用搜索API端点
     const apiUrl = '/api/search';
+
+    if (progressCallback) {
+      progressCallback(`使用简单搜索模式查询：${query}`, 'pending');
+    }
 
     const payload = {
       query,
@@ -253,13 +419,11 @@ async function simpleSearch(
       numResults: apiConfig.searxng.numResults || 10
     };
 
-    console.log('发送简单SearXNG搜索请求:', {
-      端点: apiUrl,
-      查询: query,
-      SearXNG: searxngUrl
-    });
-
     const response = await axios.post(apiUrl, payload);
+
+    if (progressCallback) {
+      progressCallback('简单搜索完成', 'completed');
+    }
 
     // 检查响应格式，确保返回的是有效的SearxngResult
     if (response.data && Array.isArray(response.data.results)) {
@@ -292,6 +456,9 @@ async function simpleSearch(
     return response.data;
   } catch (error) {
     console.error("简单搜索请求失败:", error);
+    if (progressCallback) {
+      progressCallback(`简单搜索也失败了：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
     return null;
   }
 }
@@ -341,28 +508,48 @@ function formatSearchResultsForAI(results: SearxngResult | null): string {
   formattedText += "4. 可靠的信息来源\n";
   formattedText += "5. 相关的背景和影响\n";
   formattedText += "6. 尽可能分析不同来源信息的差异，整合最完整和准确的事实\n";
+  formattedText += "7. 在事件来源中，必须加入原始新闻的URL链接，以便用户查看原始报道\n";
 
   return formattedText;
 }
 
-// 修改：fetchTimelineData函数，添加搜索支持
+// 修改：fetchTimelineData函数，修改超时设置并添加流式处理支持
 export async function fetchTimelineData(
   query: string,
-  apiConfig: ApiConfig
+  apiConfig: ApiConfig,
+  progressCallback?: ProgressCallback,
+  streamCallback?: StreamCallback
 ): Promise<TimelineData> {
   try {
     const { model, endpoint, apiKey } = apiConfig;
     // 使用中间层API端点
     const apiUrl = getApiUrl(apiConfig, 'chat');
 
+    if (progressCallback) {
+      progressCallback(`开始处理关键词：${query}`, 'pending');
+    }
+
     // 先执行搜索查询获取最新信息
     let searchResults = null;
     let searchContext = "";
 
     if (apiConfig.searxng?.enabled) {
-      searchResults = await searchWithSearxng(query, apiConfig);
+      searchResults = await searchWithSearxng(query, apiConfig, progressCallback);
       searchContext = formatSearchResultsForAI(searchResults);
-      console.log('获取到搜索结果:', searchResults ? '成功' : '失败');
+      if (progressCallback) {
+        progressCallback(
+          `搜索完成，${
+            searchResults && searchResults.results.length > 0
+              ? `获取到${searchResults.results.length}条结果`
+              : '未找到结果'
+          }`,
+          searchResults && searchResults.results.length > 0 ? 'completed' : 'completed'
+        );
+      }
+    }
+
+    if (progressCallback) {
+      progressCallback(`正在使用AI助手生成时间轴，模型：${model}`, 'pending');
     }
 
     const payload = {
@@ -378,10 +565,6 @@ export async function fetchTimelineData(
       temperature: 0.7
     };
 
-    const headers = {
-      'Content-Type': 'application/json'
-    };
-
     // 检查是否是使用环境变量配置
     const isUsingEnvConfig =
       model === "使用环境变量配置" ||
@@ -392,41 +575,105 @@ export async function fetchTimelineData(
       使用环境变量: isUsingEnvConfig,
       端点: apiUrl,
       模型: model,
-      使用搜索: searchContext ? '是' : '否'
+      使用搜索: searchContext ? '是' : '否',
+      使用流式输出: streamCallback ? '是' : '否'
     });
 
-    const response = await axios.post(apiUrl, payload, { headers });
+    // 处理结果的变量
+    let content = "";
 
-    // 提取AI响应内容
-    const content = response.data.choices[0].message.content;
+    // 如果提供了streamCallback，使用流式处理
+    if (streamCallback) {
+      // 收集完整输出
+      let fullOutput = "";
+
+      // 流式请求处理回调
+      const handleStreamChunk = (chunk: string, isDone: boolean) => {
+        // 将新的内容块添加到完整输出中
+        fullOutput += chunk;
+
+        // 传递给原始回调
+        streamCallback(chunk, isDone);
+
+        // 当完成时，标记进度为完成
+        if (isDone && progressCallback) {
+          progressCallback('AI助手已生成时间轴数据，正在处理结果', 'completed');
+        }
+      };
+
+      // 发起流式请求
+      await fetchWithStream(apiUrl, payload, handleStreamChunk);
+
+      // 使用收集的完整输出
+      content = fullOutput;
+    } else {
+      // 非流式处理：原有的实现
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      // 设置请求超时时间为45秒，避免Netlify的504超时
+      const response = await axios.post(apiUrl, payload, {
+        headers,
+        timeout: API_TIMEOUT_MS
+      });
+
+      // 提取AI响应内容
+      content = response.data.choices[0].message.content;
+
+      if (progressCallback) {
+        progressCallback('AI助手已生成时间轴数据，正在处理结果', 'completed');
+      }
+    }
 
     // 解析文本响应
-    return parseTimelineText(content);
+    const result = parseTimelineText(content);
+
+    if (progressCallback) {
+      progressCallback(`生成完成，共包含 ${result.events.length} 个事件`, 'completed');
+    }
+
+    return result;
   } catch (error) {
     console.error("API request failed:", error);
+    if (progressCallback) {
+      progressCallback(`生成时间轴失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
     throw error;
   }
 }
 
-// 修改：fetchEventDetails函数，添加搜索支持
+// 修改：fetchEventDetails函数，修改超时设置并添加流式处理支持
 export async function fetchEventDetails(
   eventId: string,
   query: string,
-  apiConfig: ApiConfig
+  apiConfig: ApiConfig,
+  progressCallback?: ProgressCallback,
+  streamCallback?: StreamCallback
 ): Promise<string> {
   try {
     const { model, endpoint, apiKey } = apiConfig;
     // 使用新的 event-details 端点
     const apiUrl = getApiUrl(apiConfig, 'event-details');
 
+    if (progressCallback) {
+      progressCallback(`正在获取事件【${query.split('\n\n')[0].substring(0, 30)}...】的详细信息`, 'pending');
+    }
+
     // 先执行搜索查询获取最新信息
     let searchResults = null;
     let searchContext = "";
 
     if (apiConfig.searxng?.enabled) {
-      searchResults = await searchWithSearxng(query, apiConfig);
+      searchResults = await searchWithSearxng(query, apiConfig, progressCallback);
       searchContext = formatSearchResultsForAI(searchResults);
-      console.log('获取到事件详情搜索结果:', searchResults ? '成功' : '失败');
+      if (progressCallback) {
+        progressCallback('事件详情搜索完成', 'completed');
+      }
+    }
+
+    if (progressCallback) {
+      progressCallback('正在使用AI助手分析事件详情', 'pending');
     }
 
     const payload = {
@@ -445,10 +692,6 @@ export async function fetchEventDetails(
       temperature: 0.7
     };
 
-    const headers = {
-      'Content-Type': 'application/json'
-    };
-
     // 检查是否是使用环境变量配置
     const isUsingEnvConfig =
       model === "使用环境变量配置" ||
@@ -459,15 +702,174 @@ export async function fetchEventDetails(
       使用环境变量: isUsingEnvConfig,
       端点: apiUrl,
       模型: model,
-      使用搜索: searchContext ? '是' : '否'
+      使用搜索: searchContext ? '是' : '否',
+      使用流式输出: streamCallback ? '是' : '否'
     });
 
-    const response = await axios.post(apiUrl, payload, { headers });
+    // 处理结果的变量
+    let content = "";
 
-    // 提取内容
-    return response.data.choices[0].message.content;
+    // 如果提供了streamCallback，使用流式处理
+    if (streamCallback) {
+      // 收集完整输出
+      let fullOutput = "";
+
+      // 流式请求处理回调
+      const handleStreamChunk = (chunk: string, isDone: boolean) => {
+        // 将新的内容块添加到完整输出中
+        fullOutput += chunk;
+
+        // 传递给原始回调
+        streamCallback(chunk, isDone);
+
+        // 当完成时，标记进度为完成
+        if (isDone && progressCallback) {
+          progressCallback('事件详情分析完成', 'completed');
+        }
+      };
+
+      // 发起流式请求
+      await fetchWithStream(apiUrl, payload, handleStreamChunk);
+
+      // 使用收集的完整输出
+      content = fullOutput;
+    } else {
+      // 非流式处理：原有的实现
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      // 设置请求超时时间为45秒，避免Netlify的504超时
+      const response = await axios.post(apiUrl, payload, {
+        headers,
+        timeout: API_TIMEOUT_MS
+      });
+
+      // 提取内容
+      content = response.data.choices[0].message.content;
+
+      if (progressCallback) {
+        progressCallback('事件详情分析完成', 'completed');
+      }
+    }
+
+    return content;
   } catch (error) {
     console.error("API request failed:", error);
+    if (progressCallback) {
+      progressCallback(`获取事件详情失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
+    throw error;
+  }
+}
+
+// 新增：获取影响评估数据
+export async function fetchImpactAssessment(
+  query: string,
+  apiConfig: ApiConfig,
+  progressCallback?: ProgressCallback,
+  streamCallback?: StreamCallback
+): Promise<string> {
+  try {
+    const { model, endpoint, apiKey } = apiConfig;
+    // 使用专门的影响评估端点
+    const apiUrl = getApiUrl(apiConfig, 'impact-assessment');
+
+    if (progressCallback) {
+      progressCallback(`正在获取事件【${query.substring(0, 30)}...】的影响评估`, 'pending');
+    }
+
+    // 先执行搜索查询获取最新信息
+    let searchResults = null;
+    let searchContext = "";
+
+    if (apiConfig.searxng?.enabled) {
+      searchResults = await searchWithSearxng(query, apiConfig, progressCallback);
+      searchContext = formatSearchResultsForAI(searchResults);
+      if (progressCallback) {
+        progressCallback('影响评估数据搜索完成', 'completed');
+      }
+    }
+
+    if (progressCallback) {
+      progressCallback('正在使用AI助手分析事件影响', 'pending');
+    }
+
+    const payload = {
+      model: model,
+      endpoint: endpoint,
+      apiKey: apiKey,
+      query: query,
+      searchResults: searchContext || undefined
+    };
+
+    // 检查是否是使用环境变量配置
+    const isUsingEnvConfig =
+      model === "使用环境变量配置" ||
+      endpoint === "使用环境变量配置" ||
+      apiKey === "使用环境变量配置";
+
+    console.log('发送影响评估请求到服务器:', {
+      使用环境变量: isUsingEnvConfig,
+      端点: apiUrl,
+      模型: model,
+      使用搜索: searchContext ? '是' : '否',
+      使用流式输出: streamCallback ? '是' : '否'
+    });
+
+    // 处理结果的变量
+    let content = "";
+
+    // 如果提供了streamCallback，使用流式处理
+    if (streamCallback) {
+      // 收集完整输出
+      let fullOutput = "";
+
+      // 流式请求处理回调
+      const handleStreamChunk = (chunk: string, isDone: boolean) => {
+        // 将新的内容块添加到完整输出中
+        fullOutput += chunk;
+
+        // 传递给原始回调
+        streamCallback(chunk, isDone);
+
+        // 当完成时，标记进度为完成
+        if (isDone && progressCallback) {
+          progressCallback('影响评估分析完成', 'completed');
+        }
+      };
+
+      // 发起流式请求
+      await fetchWithStream(apiUrl, payload, handleStreamChunk);
+
+      // 使用收集的完整输出
+      content = fullOutput;
+    } else {
+      // 非流式处理
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      // 设置请求超时
+      const response = await axios.post(apiUrl, payload, {
+        headers,
+        timeout: API_TIMEOUT_MS
+      });
+
+      // 提取内容
+      content = response.data.choices[0].message.content;
+
+      if (progressCallback) {
+        progressCallback('影响评估分析完成', 'completed');
+      }
+    }
+
+    return content;
+  } catch (error) {
+    console.error("Impact assessment API request failed:", error);
+    if (progressCallback) {
+      progressCallback(`获取影响评估失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
     throw error;
   }
 }

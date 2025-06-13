@@ -85,10 +85,19 @@ export function validateAccessPassword(password: string): boolean {
 
 // 获取环境变量中的SearXNG URL
 export function getEnvSearxngUrl(): string | undefined {
-  return process.env.NEXT_PUBLIC_SEARXNG_URL;
+  const url = process.env.NEXT_PUBLIC_SEARXNG_URL;
+  // 如果环境变量中的URL为空，则返回undefined，由应用使用默认值
+  return url && url.trim() !== '' ? url : undefined;
 }
 
 // 获取环境变量中的SearXNG启用状态
 export function getEnvSearxngEnabled(): boolean {
-  return process.env.NEXT_PUBLIC_SEARXNG_ENABLED === 'true';
+  // 如果NEXT_PUBLIC_SEARXNG_ENABLED明确设置为'true'，则返回true
+  if (process.env.NEXT_PUBLIC_SEARXNG_ENABLED === 'true') {
+    return true;
+  }
+
+  // 如果NEXT_PUBLIC_SEARXNG_URL已设置且不为空，则自动启用SearXNG
+  const url = process.env.NEXT_PUBLIC_SEARXNG_URL;
+  return (url !== undefined && url.trim() !== '');
 }

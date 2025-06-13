@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { type ApiConfig, type SearxngResult, type SearxngSearchItem } from '@/types';
+import type { ApiConfig, SearxngResult, SearxngSearchItem } from '@/types';
+import type { ProgressCallback } from './api';
 
 // NLP相关工具函数 - 中文分词简易实现
 function segmentChineseWords(text: string): string[] {
@@ -171,128 +172,6 @@ export function analyzeAndSplitQuery(originalQuery: string): string[] {
 
   // 去重
   return Array.from(new Set(queries));
-}
-
-/**
- * 并行执行多个搜索请求，带有自动重试和超时调整
- * @param queries 查询词数组
- * @param apiConfig API配置
- * @param searxngUrl SearXNG服务URL
- * @returns 合并后的搜索结果
- */
-export async function parallelSearch(
-  queries: string[],
-  apiConfig: ApiConfig,
-  searxngUrl: string
-): Promise<SearxngResult> {
-  // 确保查询词不为空
-  if (!queries || queries.length === 0) {
-    return {
-      query: '',
-      results: []
-    };
-  }
-
-  console.log(`执行并行搜索，共${queries.length}个查询:`);
-  queries.forEach((q, i) => console.log(`  查询${i+1}: "${q}"`));
-
-  // 构建搜索批次，避免一次性发送太多请求
-  const batchSize = 5; // 每批最多5个请求
-  const batches: string[][] = [];
-
-  for (let i = 0; i < queries.length; i += batchSize) {
-    batches.push(queries.slice(i, i + batchSize));
-  }
-
-  // 所有批次的结果
-  const allResults: any[] = [];
-
-  // 分批处理查询
-  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-    const batch = batches[batchIndex];
-    console.log(`处理搜索批次 ${batchIndex + 1}/${batches.length}，包含 ${batch.length} 个查询`);
-
-    // 构建每个查询的搜索函数，包含重试逻辑
-    const searchFunctions = batch.map(query => async () => {
-      // 重试参数
-      const maxRetries = 2;
-      const initialTimeout = 15000; // 初始超时15秒
-
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        // 增加超时时间（每次重试增加5秒）
-        const timeout = initialTimeout + (attempt * 5000);
-
-        try {
-          // 构建请求参数
-          // 为每个查询使用最合适的引擎子集
-          const engines = determineEnginesForQuery(query, apiConfig.searxng?.engines);
-
-          const payload = {
-            query,
-            searxngUrl,
-            categories: apiConfig.searxng?.categories || 'general',
-            language: apiConfig.searxng?.language || 'zh',
-            timeRange: apiConfig.searxng?.timeRange || 'year',
-            engines: engines,
-            numResults: 5, // 每个查询取较少的结果，避免过多重复
-            safesearch: 0, // 禁用安全搜索，获取更多结果
-            display_error: true, // 获取详细错误信息
-            timeout // 动态超时时间
-          };
-
-          // 使用中间层API发起搜索请求
-          console.log(`执行查询 "${query}" (尝试 ${attempt + 1}/${maxRetries + 1}，超时 ${timeout}ms)`);
-          const response = await axios.post('/api/search', payload, { timeout });
-
-          // 返回带有原始查询词的结果
-          if (response.data && response.data.results) {
-            console.log(`查询 "${query}" 成功，获取到 ${response.data.results.length} 条结果`);
-            return {
-              ...response.data,
-              originalQuery: query // 添加原始查询词字段，用于后续合并
-            };
-          }
-
-          console.warn(`查询 "${query}" 返回格式不正确:`, response.data);
-          return null;
-        } catch (error) {
-          console.error(`查询 "${query}" 尝试 ${attempt + 1} 失败:`, error);
-
-          // 如果已达到最大重试次数，返回null
-          if (attempt === maxRetries) {
-            console.error(`查询 "${query}" 在 ${maxRetries + 1} 次尝试后失败`);
-            return null;
-          }
-
-          // 等待一段时间再重试
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
-
-      return null;
-    });
-
-    // 顺序执行批次内的查询，避免并发过多导致被封
-    for (const searchFunction of searchFunctions) {
-      const result = await searchFunction();
-      if (result) {
-        allResults.push(result);
-      }
-    }
-  }
-
-  const validResults = allResults.filter(r => r !== null && r.results && r.results.length > 0);
-
-  // 如果没有有效结果，返回空结果
-  if (validResults.length === 0) {
-    return {
-      query: queries[0],
-      results: []
-    };
-  }
-
-  // 合并搜索结果
-  return mergeSearchResults(validResults, queries[0]);
 }
 
 /**
@@ -518,18 +397,183 @@ function calculateRelevanceScore(
 }
 
 /**
+ * 并行执行多个搜索请求，带有自动重试和超时调整
+ * @param queries 查询词数组
+ * @param apiConfig API配置
+ * @param searxngUrl SearXNG服务URL
+ * @param progressCallback 进度回调函数
+ * @returns 合并后的搜索结果
+ */
+export async function parallelSearch(
+  queries: string[],
+  apiConfig: ApiConfig,
+  searxngUrl: string,
+  progressCallback?: ProgressCallback
+): Promise<SearxngResult> {
+  // 确保查询词不为空
+  if (!queries || queries.length === 0) {
+    return {
+      query: '',
+      results: []
+    };
+  }
+
+  if (progressCallback) {
+    progressCallback(`开始并行搜索，共 ${queries.length} 个查询`, 'pending');
+  }
+
+  // 构建搜索批次，避免一次性发送太多请求
+  const batchSize = 4; // 每批最多4个请求，减少并发量
+  const batches: string[][] = [];
+
+  for (let i = 0; i < queries.length; i += batchSize) {
+    batches.push(queries.slice(i, i + batchSize));
+  }
+
+  // 所有批次的结果
+  const allResults: any[] = [];
+
+  // 分批处理查询
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    const batch = batches[batchIndex];
+    if (progressCallback) {
+      progressCallback(`处理搜索批次 ${batchIndex + 1}/${batches.length}，包含 ${batch.length} 个查询`, 'pending');
+    }
+
+    // 构建每个查询的搜索函数，包含重试逻辑
+    const searchFunctions = batch.map(query => async () => {
+      // 重试参数
+      const maxRetries = 1; // 减少最大重试次数，避免超时
+      const initialTimeout = 40000; // 初始超时40秒，符合Netlify限制
+
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // 每次重试仅增加5秒超时时间，确保不超过Netlify的限制
+        const timeout = initialTimeout + (attempt * 5000);
+
+        try {
+          // 构建请求参数
+          // 为每个查询使用最合适的引擎子集
+          const engines = determineEnginesForQuery(query, apiConfig.searxng?.engines);
+
+          if (progressCallback && attempt === 0) {
+            progressCallback(`执行查询: "${query.length > 30 ? query.substring(0, 30) + '...' : query}"`, 'pending');
+          } else if (progressCallback && attempt > 0) {
+            progressCallback(`重试查询: "${query.length > 30 ? query.substring(0, 30) + '...' : query}" (尝试 ${attempt + 1}/${maxRetries + 1})`, 'pending');
+          }
+
+          const payload = {
+            query,
+            searxngUrl,
+            categories: apiConfig.searxng?.categories || 'general',
+            language: apiConfig.searxng?.language || 'zh',
+            timeRange: apiConfig.searxng?.timeRange || 'year',
+            engines: engines,
+            numResults: 4, // 减少每个查询的结果数，避免处理大量数据
+            safesearch: 0, // 禁用安全搜索，获取更多结果
+            display_error: true, // 获取详细错误信息
+            timeout // 动态超时时间
+          };
+
+          // 使用中间层API发起搜索请求
+          const response = await axios.post('/api/search', payload, { timeout });
+
+          // 返回带有原始查询词的结果
+          if (response.data && response.data.results) {
+            if (progressCallback) {
+              progressCallback(`查询 "${query.length > 30 ? query.substring(0, 30) + '...' : query}" 成功，获取到 ${response.data.results.length} 条结果`, 'completed');
+            }
+
+            return {
+              ...response.data,
+              originalQuery: query // 添加原始查询词字段，用于后续合并
+            };
+          }
+
+          if (progressCallback) {
+            progressCallback(`查询 "${query.length > 30 ? query.substring(0, 30) + '...' : query}" 返回格式不正确`, 'error');
+          }
+
+          return null;
+        } catch (error) {
+          if (progressCallback) {
+            progressCallback(`查询 "${query.length > 30 ? query.substring(0, 30) + '...' : query}" 失败: ${error instanceof Error ? error.message : '未知错误'}`,
+              attempt === maxRetries ? 'error' : 'pending');
+          }
+
+          // 如果已达到最大重试次数，返回null
+          if (attempt === maxRetries) {
+            return null;
+          }
+
+          // 等待一段时间再重试
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+
+      return null;
+    });
+
+    // 顺序执行批次内的查询，避免并发过多导致被封
+    for (const searchFunction of searchFunctions) {
+      const result = await searchFunction();
+      if (result) {
+        allResults.push(result);
+      }
+    }
+  }
+
+  const validResults = allResults.filter(r => r !== null && r.results && r.results.length > 0);
+
+  // 如果没有有效结果，返回空结果
+  if (validResults.length === 0) {
+    if (progressCallback) {
+      progressCallback('所有查询均未返回有效结果', 'completed');
+    }
+
+    return {
+      query: queries[0],
+      results: []
+    };
+  }
+
+  if (progressCallback) {
+    progressCallback(`搜索完成，正在合并 ${validResults.length} 个有效结果`, 'pending');
+  }
+
+  // 合并搜索结果
+  const result = mergeSearchResults(validResults, queries[0]);
+
+  if (progressCallback) {
+    progressCallback(`结果合并完成，最终获取到 ${result.results.length} 条结果`, 'completed');
+  }
+
+  return result;
+}
+
+/**
  * 使用智能拆分和并行搜索获取更全面的结果
  * @param query 原始查询词
  * @param apiConfig API配置
+ * @param progressCallback 进度回调函数
  * @returns 增强的搜索结果
  */
 export async function enhancedSearch(
   query: string,
-  apiConfig: ApiConfig
+  apiConfig: ApiConfig,
+  progressCallback?: ProgressCallback
 ): Promise<SearxngResult | null> {
-  // 检查是否启用SearXNG
-  if (!apiConfig.searxng?.enabled || !apiConfig.searxng?.url) {
-    console.log('SearXNG搜索未启用或URL未配置');
+  // 检查是否启用SearXNG，考虑到自动启用的逻辑
+  if (!apiConfig.searxng) {
+    console.log('SearXNG搜索未配置');
+    return null;
+  }
+
+  // 如果明确禁用 或 没有配置URL，则不执行搜索
+  if (apiConfig.searxng.enabled === false || !apiConfig.searxng.url) {
+    console.log('SearXNG搜索未启用或URL未配置', {
+      enabled: apiConfig.searxng.enabled,
+      url: apiConfig.searxng.url
+    });
     return null;
   }
 
@@ -537,8 +581,10 @@ export async function enhancedSearch(
 
   // 1. 分析并拆分查询
   const queries = analyzeAndSplitQuery(query);
-  console.log('查询拆分结果:', queries);
+  if (progressCallback) {
+    progressCallback(`搜索查询已拆分为 ${queries.length} 个子查询以获取更全面的结果`, 'pending');
+  }
 
   // 2. 并行执行搜索
-  return parallelSearch(queries, apiConfig, searxngUrl);
+  return parallelSearch(queries, apiConfig, searxngUrl, progressCallback);
 }

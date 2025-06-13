@@ -1,84 +1,182 @@
-## 一线 (OneLine)
+# OneLine (一线) 
 
-一线是一个热点事件时间轴分析工具，它可以帮助用户快速了解重大事件的发展脉络并提供AI辅助分析。
-### [Demo站点](https://oneline.chengtx.me)
-![image](https://github.com/user-attachments/assets/6d20acf8-c4a7-4a52-9849-1d526ec50ba7)
-![image](https://github.com/user-attachments/assets/1b8adf2c-2223-4ba5-94bd-0c223889fd1b)
+OneLine（一线）是一个AI驱动的热点事件梳理分析工具，让您轻松追踪和了解热门事件的发展过程及其带来的影响。
+- ![](https://img.shields.io/badge/One-Line-blue)![GitHub Stars](https://img.shields.io/github/stars/chengtx809/OneLine?style=social) ![GitHub Forks](https://img.shields.io/github/forks/chengtx809/OneLine?style=social)
+## 演示
 
-## 主要功能
+在线体验：[https://oneline.chengtx.me](https://oneline.chengtx.me)
 
-- 根据用户输入的关键词，生成相关历史事件的时间轴
-- 显示每个事件的时间、标题、描述和相关人物
-- 时间筛选功能，可按不同时间范围筛选事件
-- AI分析功能，提供事件的深入背景、过程、影响分析
-- 标记事件信息来源，增强可信度
+![OneLine 截图1](https://ext.same-assets.com/1204961896/3933883241.png)
+![OneLine 截图2](https://ext.same-assets.com/1204961896/3709366445.png)
 
-## 技术栈
+## 🌟 主要功能
 
-- Next.js
-- React
-- TypeScript
-- Tailwind CSS
-- shadcn/ui 组件库
+* 利用AI技术为热点新闻生成完整时间轴，直观展示事件发展过程
+* 支持自定义搜索内容，实时生成您感兴趣的事件时间轴
+* 内置网络搜索功能，自动获取最新事件信息
+* 简洁优雅的用户界面，提供流畅的浏览体验
+* 支持多种AI模型，包括Gemini和OpenAI的API
+* 支持SearXNG自定义搜索引擎，提供更精准的内容检索
 
-## Docker部署
-感谢 [@justincnn](https://github.com/justincnn) 佬构建的镜像
-```
+## 🔧 技术栈
+
+* Next.js
+* React
+* TypeScript
+* Tailwind CSS
+* shadcn/ui 组件库
+
+## 🚀 快速开始
+
+### Vercel部署（推荐）
+
+fork仓库后填入环境变量部署即可
+
+### Docker部署
+
+直接使用预构建的Docker镜像：
+
+```bash
 docker pull justincnn/oneline
 ```
 
-## 配置
+然后运行容器：
 
-### 前端配置
+```bash
+docker run -p 3000:3000 justincnn/oneline
+```
 
-该应用需要配置外部AI API（如Google Gemini API或OpenAI API）才能正常工作。在使用前，点击右上角的"API设置"按钮，配置以下信息：
+访问 `http://localhost:3000` 即可使用。
 
-- API端点
-- 模型名称
-- API密钥
+#### Docker配置
 
-### 环境变量配置
+如果需要自定义配置，可以通过环境变量进行设置：
 
-除了前端配置外，你还可以通过环境变量来配置API设置。这对于部署环境特别有用，可以避免将敏感信息暴露给用户。
+```bash
+docker run -p 3000:3000 \
+  -e API_ENDPOINT=https://api.example.com/v1/chat/completions \
+  -e API_MODEL=gemini-2.0-pro-exp-search \
+  -e API_KEY=your_api_key_here \
+  -e NEXT_PUBLIC_ALLOW_USER_CONFIG=true \
+  -e NEXT_PUBLIC_SEARXNG_URL=https://sousuo.emoe.top \
+  -e NEXT_PUBLIC_SEARXNG_ENABLED=true \
+  justincnn/oneline
+```
 
-1. 复制项目根目录下的`.env.example`文件为`.env.local`
-2. 在`.env.local`文件中填入你的配置：
+### 本地开发环境
+
+1. 克隆仓库
+
+```bash
+git clone https://github.com/chengtx809/OneLine.git
+cd OneLine
+```
+
+2. 安装依赖
+
+```bash
+# 使用bun包管理器（推荐）
+bun install
+# 或使用npm
+npm install
+```
+
+3. 配置环境变量
+
+```bash
+# 复制环境变量示例文件
+cp .env.example .env.local
+# 编辑.env.local文件，填入所需的API密钥等信息
+```
+
+4. 启动开发服务器
+
+```bash
+bun run dev
+# 或使用npm
+npm run dev
+```
+
+5. 访问 `http://localhost:3000` 开始使用
+
+## ⚙️ 配置说明
+
+在 `.env.local` 中配置以下环境变量：
 
 ```
-# 服务器端环境变量
-# API端点配置
+# AI API端点
+# 可以是OpenAI、Google Gemini等API
 API_ENDPOINT=https://api.example.com/v1/chat/completions
 
-# API模型配置
+# API模型名称
 API_MODEL=gemini-2.0-pro-exp-search
 
-# API密钥配置
+# API密钥
 API_KEY=your_api_key_here
 
-# 是否允许用户在前端配置API设置
-# 设置为"false"将禁止用户在前端修改API设置
-# 设置为"true"或不设置将允许用户在前端修改API设置
+# 是否允许用户自定义API配置
+# "false"表示用户不能修改API配置
+# "true"表示用户可以修改API配置
 NEXT_PUBLIC_ALLOW_USER_CONFIG=true
 
-# 访问密码配置
-# 设置后，用户需要输入正确的密码才能访问API设置
-# 这可以避免API被滥用，增强应用安全性
+# 访问密码（可选）
+# 如果设置，用户需要输入密码才能访问API功能
 NEXT_PUBLIC_ACCESS_PASSWORD=your_access_password_here
+
+# SearXNG搜索引擎配置
+# SearXNG搜索引擎的URL
+NEXT_PUBLIC_SEARXNG_URL=https://sousuo.emoe.top
+# 是否启用SearXNG
+NEXT_PUBLIC_SEARXNG_ENABLED=true
 ```
 
-**注意事项：**
+**重要说明：**
 
-- 环境变量配置的优先级高于前端用户配置
-- 当`NEXT_PUBLIC_ALLOW_USER_CONFIG`设置为`false`时，用户将无法在前端修改API设置
-- 当设置了`NEXT_PUBLIC_ACCESS_PASSWORD`时，用户需要输入正确的密码才能访问API设置
-- 当未设置环境变量时，将使用前端用户配置的设置
+* 当 `NEXT_PUBLIC_ALLOW_USER_CONFIG` 设置为 `false` 时，用户将无法修改API配置
+* 设置 `NEXT_PUBLIC_ACCESS_PASSWORD` 可增加对API访问的安全控制
+* SearXNG配置为可选，提供更精准的搜索能力
 
-### Vercel 部署注意事项
+### SearXNG集成
 
-在 Vercel 上部署时，请确保：
+OneLine支持集成SearXNG搜索引擎，以提高搜索质量：
 
-1. 在 Vercel 项目设置中配置环境变量（API_KEY、API_ENDPOINT 等）
-2. 不要在 Vercel 项目设置中启用"静态构建"选项
+1. 当设置了`NEXT_PUBLIC_SEARXNG_URL`环境变量时，系统将自动启用SearXNG
+2. 也可通过`NEXT_PUBLIC_SEARXNG_ENABLED`明确控制是否启用SearXNG
+3. 建议使用自己搭建的SearXNG实例，以获得更稳定的服务
 
-## 友情项目
-- [@snailyp](https://github.com/snailyp)大佬的[gemini轮询代理服务](https://github.com/snailyp/gemini-balance) 本项目的Demo站后端API服务也是使用大佬的项目，太强了🤗
+SearXNG是一个尊重隐私的元搜索引擎，可以聚合多个搜索引擎的结果，提供更全面的搜索效果。
+
+## 🌩️ Vercel部署
+
+OneLine可以轻松部署到Vercel平台：
+
+1. Fork此仓库到您的GitHub账户
+2. 在Vercel中导入该项目
+3. 在Vercel环境变量设置中配置所需的API密钥和端点（至少需要设置`API_KEY`和`API_ENDPOINT`）
+4. 如果需要控制访问权限，可设置`NEXT_PUBLIC_ACCESS_PASSWORD`环境变量
+5. 部署完成后，Vercel会提供一个域名，您可以直接访问或绑定自定义域名
+
+**注意**：如果在Vercel上部署遇到API超时问题，可以尝试修改`netlify.toml`文件中的配置以解决。
+
+## 🤝 贡献指南
+
+欢迎通过Pull Request或Issue贡献代码或提出建议。
+
+## 📜 许可证
+
+本项目采用MIT许可证 - 详情请查看[LICENSE](LICENSE)文件。
+
+## 🔗 相关链接
+
+* 在线演示：[https://oneline.chengtx.me](https://oneline.chengtx.me)
+* 项目仓库：[https://github.com/chengtx809/OneLine](https://github.com/chengtx809/OneLine)
+* Docker镜像：[justincnn/oneline](https://hub.docker.com/r/justincnn/oneline)
+
+## 🙏 致谢
+
+* 感谢[@snailyp](https://github.com/snailyp)大佬的[gemini-balance](https://github.com/snailyp/gemini-balance)项目，为本项目Demo提供了API支持
+* 感谢[@justincnn](https://github.com/justincnn)维护Docker镜像
+* 感谢所有贡献者和使用者的支持和反馈
+[![Star History Chart](https://api.star-history.com/svg?repos=chengtx809/OneLine&type=Date)](https://www.star-history.com/#chengtx809/OneLine&Date)
+[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
+

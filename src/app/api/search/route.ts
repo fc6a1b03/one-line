@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import axios from 'axios';
 
-// 增加超时时间以处理更多并行请求和多引擎搜索
-const DEFAULT_TIMEOUT_MS = 15000; // 默认15秒
-const MAX_TIMEOUT_MS = 30000; // 最大超时30秒
+// 减少超时时间以符合Netlify限制
+const DEFAULT_TIMEOUT_MS = 45000; // 默认45秒
+const MAX_TIMEOUT_MS = 45000; // 最大超时45秒
+const MAX_RETRIES = 2; // 最大重试次数
 
 // 搜索引擎列表，用于UI展示和配置
 export const AVAILABLE_ENGINES = [
@@ -50,13 +51,15 @@ export async function POST(request: Request) {
     const requestTimeout = requestData.timeout || DEFAULT_TIMEOUT_MS;
     const timeout = Math.min(Math.max(requestTimeout, 1000), MAX_TIMEOUT_MS);
 
-    // 构建SearXNG API请求URL
-    let searchUrl = `${searxngUrl}/search`;
-
     // 确保URL格式正确，并规范化URL
+    let searchUrl = searxngUrl;
     if (!searchUrl.startsWith('http://') && !searchUrl.startsWith('https://')) {
-      searchUrl = `https://${searchUrl}/search`;
+      searchUrl = `https://${searchUrl}`;
     }
+    // 确保URL末尾没有多余的斜杠
+    searchUrl = searchUrl.replace(/\/+$/, '');
+    // 拼接搜索路径
+    searchUrl += '/search';
 
     // 构建请求参数
     const params: Record<string, any> = {
@@ -87,130 +90,148 @@ export async function POST(request: Request) {
 
     console.log(`搜索请求: "${query}" 发送到 ${searchUrl}，超时: ${timeout}ms, 参数:`, params);
 
-    // 发送请求到SearXNG，使用设置的超时时间
-    const response = await axios.get(searchUrl, {
-      params,
-      timeout: timeout,
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (OneLine/1.0; +https://github.com/chengtx809/OneLine)'
-      }
-    });
+    // 实现重试逻辑
+    let lastError;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        // 发送请求到SearXNG，使用设置的超时时间
+        const response = await axios.get(searchUrl, {
+          params,
+          timeout: timeout,
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (OneLine/1.0; +https://github.com/chengtx809/OneLine)'
+          }
+        });
 
-    // 检查返回的数据是否符合预期格式
-    const data = response.data;
-    if (!data || typeof data !== 'object') {
-      console.error('SearXNG返回的数据格式不正确', data);
-      return NextResponse.json(
-        { error: 'Invalid response format from SearXNG', rawData: typeof data },
-        { status: 500 }
-      );
-    }
-
-    // 确保结果字段存在且是数组
-    if (!Array.isArray(data.results)) {
-      console.warn('SearXNG返回的结果不是数组，尝试适配', data);
-
-      // 尝试适配响应格式
-      const adaptedData = {
-        query: query,
-        results: Array.isArray(data) ? data : [],
-        number_of_results: 0,
-        search_url: searchUrl, // 添加搜索URL，便于调试
-        params: params // 添加使用的参数，便于调试
-      };
-
-      if (adaptedData.results.length > 0) {
-        adaptedData.number_of_results = adaptedData.results.length;
-        return NextResponse.json(adaptedData);
-      } else {
-        // 检查是否有其他可用数据，例如answers或suggestions
-        if (data.answers && data.answers.length > 0) {
-          adaptedData.results = data.answers.map((answer: string) => ({
-            title: `${answer}`,
-            content: answer,
-            url: searchUrl,
-            engine: 'searxng_answers'
-          }));
-          adaptedData.number_of_results = adaptedData.results.length;
-          return NextResponse.json(adaptedData);
+        // 检查返回的数据是否符合预期格式
+        const data = response.data;
+        if (!data || typeof data !== 'object') {
+          console.error('SearXNG返回的数据格式不正确', data);
+          return NextResponse.json(
+            { error: 'Invalid response format from SearXNG', rawData: typeof data },
+            { status: 500 }
+          );
         }
 
-        if (data.suggestions && data.suggestions.length > 0) {
-          adaptedData.results = data.suggestions.map((suggestion: string) => ({
-            title: `建议搜索: ${suggestion}`,
-            content: `您可能想搜索: ${suggestion}`,
-            url: `${searchUrl}?q=${encodeURIComponent(suggestion)}`,
-            engine: 'searxng_suggestions'
-          }));
-          adaptedData.number_of_results = adaptedData.results.length;
-          return NextResponse.json(adaptedData);
-        }
+        // 确保结果字段存在且是数组
+        if (!Array.isArray(data.results)) {
+          console.warn('SearXNG返回的结果不是数组，尝试适配', data);
 
-        return NextResponse.json(
-          {
+          // 尝试适配响应格式
+          const adaptedData = {
             query: query,
-            results: [],
+            results: Array.isArray(data) ? data : [],
             number_of_results: 0,
-            message: 'No results found in SearXNG response',
-            search_url: searchUrl,
-            params: params
-          },
-          { status: 200 } // 返回200以允许继续处理
-        );
+            search_url: searchUrl, // 添加搜索URL，便于调试
+            params: params // 添加使用的参数，便于调试
+          };
+
+          if (adaptedData.results.length > 0) {
+            adaptedData.number_of_results = adaptedData.results.length;
+            return NextResponse.json(adaptedData);
+          } else {
+            // 检查是否有其他可用数据，例如answers或suggestions
+            if (data.answers && data.answers.length > 0) {
+              adaptedData.results = data.answers.map((answer: string) => ({
+                title: `${answer}`,
+                content: answer,
+                url: searchUrl,
+                engine: 'searxng_answers'
+              }));
+              adaptedData.number_of_results = adaptedData.results.length;
+              return NextResponse.json(adaptedData);
+            }
+
+            if (data.suggestions && data.suggestions.length > 0) {
+              adaptedData.results = data.suggestions.map((suggestion: string) => ({
+                title: `建议搜索: ${suggestion}`,
+                content: `您可能想搜索: ${suggestion}`,
+                url: `${searchUrl}?q=${encodeURIComponent(suggestion)}`,
+                engine: 'searxng_suggestions'
+              }));
+              adaptedData.number_of_results = adaptedData.results.length;
+              return NextResponse.json(adaptedData);
+            }
+
+            return NextResponse.json(
+              {
+                query: query,
+                results: [],
+                number_of_results: 0,
+                message: 'No results found in SearXNG response',
+                search_url: searchUrl,
+                params: params
+              },
+              { status: 200 } // 返回200以允许继续处理
+            );
+          }
+        }
+
+        // 返回搜索结果，添加一些元数据
+        return NextResponse.json({
+          ...response.data,
+          query: query, // 确保查询词被包含在响应中
+          search_url: searchUrl, // 添加搜索URL，便于调试
+          params: params // 添加使用的参数，便于调试
+        });
+      } catch (error: any) {
+        console.error(`SearXNG API request failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}):`, error.message);
+        lastError = error;
+
+        // 如果已经是最后一次尝试，则不再重试
+        if (attempt === MAX_RETRIES) {
+          break;
+        }
+
+        // 等待一段时间后重试
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
 
-    // 返回搜索结果，添加一些元数据
-    return NextResponse.json({
-      ...response.data,
-      query: query, // 确保查询词被包含在响应中
-      search_url: searchUrl, // 添加搜索URL，便于调试
-      params: params // 添加使用的参数，便于调试
-    });
-  } catch (error: any) {
-    console.error(`SearXNG API route error for query "${error.config?.params?.q || 'unknown'}":`, error.message);
+    // 所有重试均失败，处理最终错误
+    console.error(`SearXNG API route error for query "${lastError?.config?.params?.q || 'unknown'}":`, lastError?.message);
 
     // 提供更详细的错误信息和解决建议
-    const errorCode = error.code || (error.response ? `${error.response.status}` : 'unknown');
+    const errorCode = lastError?.code || (lastError?.response ? `${lastError.response.status}` : 'unknown');
     const errorDescription = ERROR_DESCRIPTIONS[errorCode] || 'Unknown error occurred';
 
     // 构建错误信息
     const errorDetails = {
-      error: 'SearXNG search request failed',
+      error: 'SearXNG search request failed after multiple attempts',
       error_code: errorCode,
       error_description: errorDescription,
-      message: error.message,
-      query: error.config?.params?.q || 'unknown',
-      search_url: error.config?.url,
-      params: error.config?.params
+      message: lastError?.message,
+      query: lastError?.config?.params?.q || 'unknown',
+      search_url: lastError?.config?.url,
+      params: lastError?.config?.params
     };
 
     // 如果有响应数据，添加到错误中
-    if (error.response) {
-      errorDetails.status = error.response.status;
-      errorDetails.statusText = error.response.statusText;
-      errorDetails.data = error.response.data;
-    } else if (error.code === 'ECONNABORTED') {
+    if (lastError?.response) {
+      errorDetails.status = lastError.response.status;
+      errorDetails.statusText = lastError.response.statusText;
+      errorDetails.data = lastError.response.data;
+    } else if (lastError?.code === 'ECONNABORTED') {
       // 请求超时，返回更具体的错误信息，但仍使用200状态码以允许继续处理
-      console.warn(`搜索请求 "${error.config?.params?.q || 'unknown'}" 超时，超时设置为 ${error.config?.timeout || DEFAULT_TIMEOUT_MS}ms`);
+      console.warn(`搜索请求 "${lastError.config?.params?.q || 'unknown'}" 超时，超时设置为 ${lastError.config?.timeout || DEFAULT_TIMEOUT_MS}ms`);
       return NextResponse.json(
         {
-          query: error.config?.params?.q || 'unknown',
+          query: lastError.config?.params?.q || 'unknown',
           results: [],
           number_of_results: 0,
-          message: `Search request timed out after ${error.config?.timeout || DEFAULT_TIMEOUT_MS}ms`,
+          message: `Search request timed out after ${lastError.config?.timeout || DEFAULT_TIMEOUT_MS}ms`,
           error_code: 'ECONNABORTED',
           error_description: ERROR_DESCRIPTIONS['ECONNABORTED'] || '请求超时',
-          search_url: error.config?.url,
-          params: error.config?.params
+          search_url: lastError.config?.url,
+          params: lastError.config?.params
         },
         { status: 200 } // 返回200以允许继续处理
       );
-    } else if (error.request) {
+    } else if (lastError?.request) {
       // 请求已发出但没有收到响应
       errorDetails.request = 'Request was made but no response was received';
-      errorDetails.timeout = error.code === 'ECONNABORTED';
+      errorDetails.timeout = lastError.code === 'ECONNABORTED';
     }
 
     // 返回错误响应，但使用200状态码以便客户端不中断处理
@@ -221,6 +242,19 @@ export async function POST(request: Request) {
         number_of_results: 0
       },
       { status: 200 }
+    );
+  } catch (error: any) {
+    console.error('Search API route general error:', error);
+
+    // 返回通用错误
+    return NextResponse.json(
+      {
+        error: 'Search API request processing failed',
+        message: error.message,
+        results: [],
+        number_of_results: 0
+      },
+      { status: 200 } // 使用200状态码以便客户端继续处理
     );
   }
 }

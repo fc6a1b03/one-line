@@ -14,9 +14,9 @@ interface ApiContextType {
   validatePassword: (password: string) => boolean;
   isPasswordValidated: boolean;
   setPasswordValidated: (validated: boolean) => void;
-  hasEnvConfig: boolean; // 新增：是否存在环境变量配置
-  useEnvConfig: boolean; // 新增：是否使用环境变量配置
-  setUseEnvConfig: (use: boolean) => void; // 新增：设置是否使用环境变量配置
+  hasEnvConfig: boolean; // 是否存在环境变量配置
+  useEnvConfig: boolean; // 是否使用环境变量配置
+  setUseEnvConfig: (use: boolean) => void; // 设置是否使用环境变量配置
 }
 
 const defaultApiConfig: ApiConfig = {
@@ -58,9 +58,9 @@ export function ApiProvider({ children }: { children: React.ReactNode }) {
   const [allowUserConfig, setAllowUserConfig] = useState<boolean>(true);
   const [isPasswordProtected, setIsPasswordProtected] = useState<boolean>(false);
   const [isPasswordValidated, setIsPasswordValidated] = useState<boolean>(false);
-  const [hasEnvConfig, setHasEnvConfig] = useState<boolean>(false); // 新增：是否存在环境变量配置
-  const [useEnvConfig, setUseEnvConfig] = useState<boolean>(false); // 新增：是否使用环境变量配置
-  const [userConfig, setUserConfig] = useState<ApiConfig | null>(null); // 新增：用户自定义配置
+  const [hasEnvConfig, setHasEnvConfig] = useState<boolean>(false); // 是否存在环境变量配置
+  const [useEnvConfig, setUseEnvConfig] = useState<boolean>(false); // 是否使用环境变量配置
+  const [userConfig, setUserConfig] = useState<ApiConfig | null>(null); // 用户自定义配置
 
   // 初始化API配置，优先使用环境变量，然后是localStorage
   useEffect(() => {
@@ -86,7 +86,9 @@ export function ApiProvider({ children }: { children: React.ReactNode }) {
         envEndpoint: envEndpoint ? '已设置' : '未设置',
         envApiKey: envApiKey ? '已设置' : '未设置',
         isClientSide: typeof window !== 'undefined',
-        envConfigStatus: process.env.NEXT_PUBLIC_HAS_SERVER_CONFIG
+        envConfigStatus: process.env.NEXT_PUBLIC_HAS_SERVER_CONFIG,
+        envSearxngUrl: envSearxngUrl ? '已设置' : '未设置',
+        envSearxngEnabled
       });
 
       // 设置是否启用密码保护
@@ -107,10 +109,10 @@ export function ApiProvider({ children }: { children: React.ReactNode }) {
       // 客户端存储的配置
       let storedUserConfig: ApiConfig | null = null;
 
-      // 是否使用环境变量配置
+      // 是否使用环境变量配置，默认优先使用环境变量配置（如果有）
       let shouldUseEnvConfig = hasServerConfig;
 
-      // 如果允许用户配置，尝试从localStorage加载
+      // 如果允许用户配置，尝试从localStorage加载用户配置和使用环境变量配置的选择
       if (userConfigAllowed && typeof window !== 'undefined') {
         // 加载用户保存的配置
         const storedConfig = localStorage.getItem('oneLine_apiConfig');
@@ -134,6 +136,7 @@ export function ApiProvider({ children }: { children: React.ReactNode }) {
         const storedUseEnvConfig = localStorage.getItem('oneLine_useEnvConfig');
         if (storedUseEnvConfig !== null) {
           shouldUseEnvConfig = storedUseEnvConfig === 'true';
+          console.log('从localStorage加载环境变量配置选择:', { shouldUseEnvConfig });
         }
       }
 
@@ -155,7 +158,8 @@ export function ApiProvider({ children }: { children: React.ReactNode }) {
           accessPassword: envAccessPassword || '',
           searxng: {
             url: envSearxngUrl || 'https://sousuo.emoe.top',
-            enabled: envSearxngEnabled,
+            // 如果NEXT_PUBLIC_SEARXNG_URL已设置，则自动启用SearXNG，即使NEXT_PUBLIC_SEARXNG_ENABLED未设置
+            enabled: envSearxngEnabled || (!!envSearxngUrl && envSearxngUrl.trim() !== ''),
             categories: 'general',
             language: 'zh',
             timeRange: 'year',
@@ -192,12 +196,20 @@ export function ApiProvider({ children }: { children: React.ReactNode }) {
 
     if (use && hasEnvConfig) {
       // 切换到环境变量配置，但不显示具体信息
-      setApiConfig(prev => ({
-        ...prev,
-        endpoint: "使用环境变量配置",
-        model: "使用环境变量配置",
-        apiKey: "使用环境变量配置",
-      }));
+      setApiConfig(prev => {
+        // 保留searxng配置，避免丢失用户自定义的搜索设置
+        const updatedConfig = {
+          ...prev,
+          endpoint: "使用环境变量配置",
+          model: "使用环境变量配置",
+          apiKey: "使用环境变量配置",
+        };
+
+        // 更新用户配置以防再次切换回来，保留之前的searxng配置
+        setUserConfig(userConfig ? { ...userConfig, searxng: prev.searxng } : prev);
+
+        return updatedConfig;
+      });
       setIsConfigured(true);
     } else if (!use && userConfig) {
       // 切换到用户自定义配置

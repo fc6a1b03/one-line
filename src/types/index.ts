@@ -15,6 +15,7 @@ export interface TimelineEvent {
   people: Person[];
   expanded?: boolean;
   source?: string; // Added source field for tracking message source
+  sourceUrl?: string; // Added sourceUrl field for linking to original news source
 }
 
 export interface Person {
